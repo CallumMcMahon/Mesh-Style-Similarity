@@ -12,6 +12,7 @@ class ClassifierModel:
     --dataset_mode -> classification / segmentation)
     --arch -> network type
     """
+    #############DOES WHAT PYTORCH LIGHTNING DOES AUTOMATICALLY####################
     def __init__(self, opt):
         self.opt = opt
         self.gpu_ids = opt.gpu_ids
@@ -40,11 +41,11 @@ class ClassifierModel:
             print_network(self.net)
 
         if not self.is_train or opt.continue_train:
-            self.load_network(opt.which_epoch)
+            self.load_network(opt.which_epoch, False)
 
     def set_input(self, data):
-        input_edge_features = torch.from_numpy(data['edge_features']).float()
-        labels = torch.from_numpy(data['label']).long()
+        input_edge_features = data['edge_features']
+        labels = data['label']
         # set inputs
         self.edge_features = input_edge_features.to(self.device).requires_grad_(self.is_train)
         self.labels = labels.to(self.device)
@@ -70,7 +71,7 @@ class ClassifierModel:
 
 ##################
 
-    def load_network(self, which_epoch):
+    def load_network(self, which_epoch, copy_fc = True):
         """load model from disk"""
         save_filename = '%s_net.pth' % which_epoch
         load_path = join(self.save_dir, save_filename)
@@ -83,7 +84,10 @@ class ClassifierModel:
         state_dict = torch.load(load_path, map_location=str(self.device))
         if hasattr(state_dict, '_metadata'):
             del state_dict._metadata
-        net.load_state_dict(state_dict)
+        if not copy_fc:
+            del state_dict["fc2.weight"]
+            del state_dict["fc2.bias"]
+        net.load_state_dict(state_dict, strict=False)
 
 
     def save_network(self, which_epoch):

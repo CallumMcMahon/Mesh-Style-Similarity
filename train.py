@@ -1,9 +1,11 @@
 import time
-from options.train_options import TrainOptions
+from p2m_options.train_options import TrainOptions
 from data import DataLoader
 from models import create_model
 from util.writer import Writer
 from test import run_test
+import pydevd_pycharm
+pydevd_pycharm.settrace('localhost', port=9876, stdoutToServer=True, stderrToServer=True)
 
 if __name__ == '__main__':
     opt = TrainOptions().parse()

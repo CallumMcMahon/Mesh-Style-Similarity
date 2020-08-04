@@ -11,4 +11,7 @@ python train.py \
 --flip_edges 0.2 \
 --slide_verts 0.2 \
 --num_aug 20 \
---niter_decay 100 \
+--niter 1 \
+--niter_decay 2 \
+--which_epoch 1
+--continue_train False \

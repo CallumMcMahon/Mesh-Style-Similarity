@@ -1,57 +1,45 @@
 import torch
 import numpy as np
 from queue import Queue
-from utils import load_obj, export, get_mesh_path
-from models.layers.mesh_prepare import extract_features
+from utils import load_obj, export
 import copy
 from pathlib import Path
 import pickle
-import os
 #from pytorch3d.ops.knn import knn_gather, knn_points
 
 
 class Mesh:
 
-    def __init__(self, file, hold_history=False, vs=None, faces=None, device='cpu', gfmm=False):
+    def __init__(self, file, hold_history=False, vs=None, faces=None, device='cpu', gfmm=True):
         if file is None:
             return
         self.filename = Path(file)
         self.vs = self.v_mask = self.edge_areas = self.color = None
         self.edges = self.gemm_edges = self.sides = None
         self.device = device
-        self.create_connectivity(vs, faces)
+        if vs is not None and faces is not None:
+            self.vs, self.faces = vs.cpu().numpy(), faces.cpu().numpy()
+            self.scale, self.translations = 1.0, np.zeros(3,)
+        else:
+            self.vs, self.faces = load_obj(file)
+            self.normalize_unit_bb()
+        self.vs_in = copy.deepcopy(self.vs)
+        self.v_mask = np.ones(len(self.vs), dtype=bool)
+        self.build_gemm()
         self.history_data = None
         if hold_history:
             self.init_history()
+        if gfmm:
+            self.gfmm = self.build_gfmm() #TODO get rid of this DS
+        else:
+            self.gfmm = None
         if type(self.vs) is np.ndarray:
             self.vs = torch.from_numpy(self.vs)
         if type(self.faces) is np.ndarray:
             self.faces = torch.from_numpy(self.faces)
-        # self.vs = self.vs.to(self.device)
-        # self.faces = self.faces.to(self.device).long()
-        # self.area, self.normals = self.face_areas_normals(self.vs, self.faces)
-
-    def create_connectivity(self, vs, faces):
-        load_path = get_mesh_path(self.filename, "connectivity")
-        if os.path.exists(load_path):
-            mesh_data = np.load(load_path, encoding='latin1', allow_pickle=True)
-            for key in mesh_data.keys():
-                self.__setattr__(key, mesh_data[key])
-            self.edges_count = int(self.edges_count)
-        else:
-            if vs is not None and faces is not None:
-                self.vs, self.faces = vs.cpu().numpy(), faces.cpu().numpy()
-                self.scale, self.translations = 1.0, np.zeros(3,)
-            else:
-                self.vs, self.faces = load_obj(self.filename)
-                self.normalize_unit_bb()
-            self.vs_in = copy.deepcopy(self.vs)
-            self.v_mask = np.ones(len(self.vs), dtype=bool)
-            self.faces, self.face_areas = self.remove_non_manifolds(self.faces)
-            self.build_gemm()
-            np.savez_compressed(load_path, gemm_edges=self.gemm_edges, vs=self.vs, faces=self.faces, edges=self.edges,
-                                edges_count=self.edges_count, ve=self.ve, v_mask=self.v_mask,
-                                sides=self.sides, scale=self.scale, translations=self.translations)
+        self.vs = self.vs.to(self.device)
+        self.faces = self.faces.to(self.device).long()
+        self.area, self.normals = self.face_areas_normals(self.vs, self.faces)
 
     def build_gemm(self):
         """
@@ -146,14 +134,15 @@ class Mesh:
                 edge = tuple(sorted([face[i], face[(i + 1) % 3]]))
                 neighbors.extend(list(set(edge_faces[edge]) - set([face_id])))
             gfmm.append(neighbors)
-        self.gfmm = torch.Tensor(gfmm).long().to(self.device)
+        return torch.Tensor(gfmm).long().to(self.device)
 
     def normalize_unit_bb(self):
         """
         normalizes to unit bounding box and translates to center
+        if no
         :param verts: new verts
         """
-        cache_norm_file = get_mesh_path(self.filename, 'normalize')
+        cache_norm_file = self.filename.with_suffix('.npz')
         if not cache_norm_file.exists():
             scale = max([self.vs[:, i].max() - self.vs[:, i].min() for i in range(3)])
             scaled_vs = self.vs / scale
@@ -207,37 +196,6 @@ class Mesh:
             # clean up
             del knn_mask
         return pc_per_face.to(self.device), (pc_per_face[:, 0] == pc_per_face[:, 0]).to(device)
-
-    def remove_non_manifolds(self, faces):
-        '''
-        :param mesh:
-        :param faces:
-        :return: subset of faces which do not break the 1-ring assumption
-        '''
-        edges_set = set()
-        # True values in mask are manifold and are kept
-        mask = np.ones(len(faces), dtype=bool)
-        face_areas, _ = self.face_areas_normals(self.vs, self.faces)
-        for face_id, face in enumerate(self.faces):
-            if face_areas[face_id] == 0:
-                mask[face_id] = False
-                continue
-            faces_edges = []
-            is_manifold = True
-            for i in range(3):
-                cur_edge = (face[i], face[(i + 1) % 3])
-                # each edge added twice, as (a, b) and (b, a). stop edge from being added third time
-                if cur_edge in edges_set:
-                    is_manifold = False
-                    break
-                else:
-                    faces_edges.append(cur_edge)
-            if not is_manifold:
-                mask[face_id] = False
-            else:
-                for idx, edge in enumerate(faces_edges):
-                    edges_set.add(edge)
-        return faces[mask], face_areas[mask]
 
     @staticmethod
     def face_areas_normals(vs, faces):
@@ -359,23 +317,9 @@ class Mesh:
         self.edges_count = self.history_data['edges_count'][-1]
 
     @staticmethod
-    def from_tensor(mesh, vs, faces, suffix="", gfmm=False):
-        newName = mesh.filename.parent / (str(mesh.filename.stem) + suffix)
-        mesh = Mesh(file=newName, vs=vs, faces=faces, device=mesh.device, hold_history=True, gfmm=gfmm)
+    def from_tensor(mesh, vs, faces, gfmm=True):
+        mesh = Mesh(file=mesh.filename, vs=vs, faces=faces, device=mesh.device, hold_history=True, gfmm=gfmm)
         return mesh
-
-    def extract_meshCNN_features(self):
-        load_path = get_mesh_path(self.filename, "meshCNN_feat")
-        if os.path.exists(load_path):
-            mesh_data = np.load(load_path, encoding='latin1', allow_pickle=True)
-            for key in mesh_data.keys():
-                self.__setattr__(key, mesh_data[key])
-        else:
-            extract_features(self)
-            np.savez_compressed(load_path, features=self.features, edge_lengths=self.edge_lengths,
-                                edge_areas=self.edge_areas)
-        if type(self.features) == np.ndarray:
-            self.features = torch.from_numpy(self.features)
 
     def submesh(self, vs_index):
         return PartMesh.create_submesh(vs_index, self)
@@ -393,36 +337,29 @@ class PartMesh:
         :param num_parts: number of parts to seperate the main_mesh into
         """
         self.main_mesh = main_mesh
-        self.sub_mesh = [None]*num_parts
-        self.n_submeshes = num_parts
-        self.bfs_depth = bfs_depth
-        load_path = get_mesh_path(self.main_mesh.filename, "0of{}connectivity".format(self.n_submeshes-1))
-        if not os.path.exists(load_path):
-            self.initialise_mesh_parts()
-
-    def initialise_mesh_parts(self):
-        # create cached data for each submesh
-        self.vs_groups = PartMesh.segment_shape(self.main_mesh.vs, seg_num=self.n_submeshes)
-        torch.unique(self.vs_groups)
+        if vs_groups is not None: #TODO is this neccesary?
+            self.vs_groups = vs_groups
+        else:
+            if n != -1:
+                self.vs_groups = PartMesh.grid_segment(self.main_mesh.vs, n=n)
+            else:
+                self.vs_groups = PartMesh.segment_shape(self.main_mesh.vs, seg_num=num_parts)
         self.n_submeshes = torch.max(self.vs_groups).item() + 1
         self.sub_mesh_index = []
         self.sub_mesh = []
         self.init_verts = []
         tmp_vs_groups = self.vs_groups.clone()
+        delta = 0
         for i in range(self.n_submeshes):
             vs_index = (self.vs_groups == i).nonzero().squeeze(1)
-            # remove empty groups and shift other group indexing down
             if vs_index.size()[0] == 0:
-                tmp_vs_groups[self.vs_groups > i] -= 1
+                tmp_vs_groups[self.vs_groups > i - delta] -= 1
                 continue
             vs_index = torch.sort(vs_index, dim=0)[0]
-            vs_index = torch.tensor(self.vs_bfs(vs_index.tolist(), self.main_mesh.faces.tolist(), self.bfs_depth),
+            vs_index = torch.tensor(self.vs_bfs(vs_index.tolist(), self.main_mesh.faces.tolist(), bfs_depth),
                                     dtype=vs_index.dtype).to(vs_index.device)
-
-            m, vs_index = self.create_submesh(vs_index, self.main_mesh,
-                                              "_{}of{}".format(len(self.sub_mesh), self.n_submeshes - 1))
+            m, vs_index = self.main_mesh.submesh(vs_index)
             self.sub_mesh.append(m)
-
             self.sub_mesh_index.append(vs_index)
             self.init_verts.append(m.vs.clone().detach())
 
@@ -439,6 +376,7 @@ class PartMesh:
                     e = tuple(sorted([face[j].item(), face[(j + 1) % 3].item()]))
                     mask[vse[e]] = 1
             self.sub_mesh_edge_index.append(self.mask_to_index(mask))
+
     def update_verts(self, new_vs: torch.Tensor, index: int):
         m = self.sub_mesh[index]
         m.update_verts(new_vs)
@@ -448,8 +386,6 @@ class PartMesh:
         """
         build self.main_mesh out of submesh's vs
         """
-        if None in self.sub_mesh:
-            self.initialise_mesh_parts()
         new_vs = torch.zeros_like(self.main_mesh.vs)
         new_vs_n = torch.zeros(self.main_mesh.vs.shape[0], dtype=new_vs.dtype).to(new_vs.device)
         colors = torch.zeros(self.main_mesh.vs.shape[0], dtype=int).to(new_vs.device)
@@ -485,44 +421,33 @@ class PartMesh:
             raise TypeError('number submesh must be int')
         if i >= self.n_submeshes:
             raise OverflowError(f'index {i} for submesh is out of bounds, max index is {self.n_submeshes - 1}')
-        if self.sub_mesh[i] is None:
-            load_file = get_mesh_path(self.main_mesh.filename, "{}of{}_connectivity".format(i, self.n_submeshes))
-            self.sub_mesh[i] = Mesh(load_file)
         return self.sub_mesh[i]
 
     def __iter__(self):
         return iter(self.sub_mesh)
 
     @staticmethod
-    def create_submesh(vs_index: torch.Tensor, mesh: Mesh, fileSuffix: str = "") -> (Mesh, torch.Tensor):
+    def create_submesh(vs_index: torch.Tensor, mesh: Mesh) -> (Mesh, torch.Tensor):
         """
         create a submesh out on a mesh object
         :param vs_index: indices of the submesh
         :param mesh: the mesh to sub
-        :param fileSuffix: the index of the submesh for filename purposes
         :return: the new submesh
         """
         vs_mask = torch.zeros(mesh.vs.shape[0])
         vs_mask[vs_index] = 1
-        # include faces where at least one vertex is included from that group
         faces_mask = vs_mask[mesh.faces].sum(dim=-1) > 0
         new_faces = mesh.faces[faces_mask].clone()
-        # grab all vertices that were added when forming full triangles
         all_verts = new_faces.view(-1)
         new_vs_mask = torch.zeros(mesh.vs.shape[0]).long().to(all_verts.device)
         new_vs_mask[all_verts] = 1
-        # remove duplicate vertices from face vertices by reconverting mask
         new_vs_index = PartMesh.mask_to_index(new_vs_mask)
         new_vs = mesh.vs[new_vs_index, :].clone()
-        vs_mask = torch.zeros(mesh.vs.shape[0])# TODO is vs_mask not the same as new_vs_mask
+        vs_mask = torch.zeros(mesh.vs.shape[0])
         vs_mask[new_vs_index] = 1
-
-        # shift face vertex indexing so it corresponds with new smaller vertex subset
         cummusum = torch.cumsum(1 - vs_mask, dim=0)
         new_faces -= cummusum[new_faces].to(new_faces.device).long()
-        # passes coordinates of relevant vertices and properly indexed face vertices
-        m = Mesh.from_tensor(mesh, new_vs.detach(), new_faces.detach(), suffix=fileSuffix, gfmm=False)
-        # return indexes updated from slight expansion
+        m = Mesh.from_tensor(mesh, new_vs.detach(), new_faces.detach(), gfmm=False)
         return m, new_vs_index
 
     @staticmethod
@@ -560,12 +485,7 @@ class PartMesh:
         return eighth.long()
 
     @staticmethod
-    def grid_segment(vs: torch.Tensor, n: int) -> torch.tensor:
-        '''
-        :param vs: the main mesh's vertices
-        :param n: the the number of splits on each of the 3 axes, n^3 groups formed
-        :return:
-        '''
+    def grid_segment(vs: torch.Tensor, n):
         maxx, _ = vs.max(dim=0)
         minn, _ = vs.min(dim=0)
         unit = (maxx - minn) / n
