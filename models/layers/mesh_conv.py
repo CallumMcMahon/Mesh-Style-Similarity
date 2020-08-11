@@ -14,11 +14,9 @@ class MeshConv(nn.Module):
         self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(1, k), bias=bias)
         self.k = k
 
-    def __call__(self, edge_f, mesh):
-        return self.forward(edge_f, mesh)
-
     def forward(self, x, mesh):
         x = x.squeeze(-1)
+        # pad gemm
         G = torch.cat([self.pad_gemm(i, x.shape[2], x.device) for i in mesh], 0)
         # build 'neighborhood image' and apply convolution
         G = self.create_GeMM(x, G)
@@ -45,7 +43,7 @@ class MeshConv(nn.Module):
         Gishape = Gi.shape
         # pad the first row of  every sample in batch with zeros
         padding = torch.zeros((x.shape[0], x.shape[1], 1), requires_grad=True, device=x.device)
-        # padding = padding.to(x.device)
+        # add zero feature vector then shift all indices. border edges now reference zero vector
         x = torch.cat((padding, x), dim=2)
         Gi = Gi + 1 #shift
 
@@ -57,11 +55,12 @@ class MeshConv(nn.Module):
         x = x.permute(0, 2, 1).contiguous()
         x = x.view(odim[0] * odim[2], odim[1])
 
+        # indices of gemm never reference padded section of x so padded section never used
         f = torch.index_select(x, dim=0, index=Gi_flat)
         f = f.view(Gishape[0], Gishape[1], Gishape[2], -1)
         f = f.permute(0, 3, 1, 2)
 
-        # apply the symmetric functions for an equivariant conv
+        # apply the symmetric functions for an equivariant convolution
         x_1 = f[:, :, :, 1] + f[:, :, :, 3]
         x_2 = f[:, :, :, 2] + f[:, :, :, 4]
         x_3 = torch.abs(f[:, :, :, 1] - f[:, :, :, 3])

@@ -93,18 +93,16 @@ def init_net(net, init_type, init_gain, gpu_ids):
     return net
 
 
-def define_classifier(input_nc, ncf, ninput_edges, nclasses, opt, gpu_ids, arch, init_type, init_gain):
+def define_classifier(input_nc, ncf, ninput_edges, pool_res, resblocks, nclasses, opt, gpu_ids, arch, init_type, init_gain, fc_n=100):
     net = None
     norm_layer = get_norm_layer(norm_type=opt.norm, num_groups=opt.num_groups)
-
+    pool_res = [ninput_edges] + pool_res
     if arch == 'mconvnet':
-        net = MeshConvNet(norm_layer, input_nc, ncf, nclasses, ninput_edges, opt.pool_res, opt.fc_n,
-                          opt.resblocks)
+        net = MeshConvNet(norm_layer, input_nc, ncf, nclasses, pool_res, fc_n, resblocks)
     elif arch == 'meshunet':
         down_convs = [input_nc] + ncf
         up_convs = ncf[::-1] + [nclasses]
-        pool_res = [ninput_edges] + opt.pool_res
-        net = MeshEncoderDecoder(pool_res, down_convs, up_convs, blocks=opt.resblocks,
+        net = MeshEncoderDecoder(pool_res, down_convs, up_convs, blocks=resblocks,
                                  transfer_data=True)
     else:
         raise NotImplementedError('Encoder model name [%s] is not recognized' % arch)
@@ -124,11 +122,11 @@ def define_loss(opt):
 class MeshConvNet(nn.Module):
     """Network for learning a global shape descriptor (classification)
     """
-    def __init__(self, norm_layer, nf0, conv_res, nclasses, input_res, pool_res, fc_n,
+    def __init__(self, norm_layer, nf0, conv_res, nclasses, pool_res, fc_n,
                  nresblocks=3):
         super(MeshConvNet, self).__init__()
         self.k = [nf0] + conv_res
-        self.res = [input_res] + pool_res
+        self.res = pool_res
         norm_args = get_norm_args(norm_layer, self.k[1:])
 
         for i, ki in enumerate(self.k[:-1]):
@@ -146,7 +144,7 @@ class MeshConvNet(nn.Module):
 
         for i in range(len(self.k) - 1):
             x = getattr(self, 'conv{}'.format(i))(x, mesh)
-            x = F.relu(getattr(self, 'norm{}'.format(i))(x))
+            x = F.relu(getattr(self, 'norm{}'.format(i))(x)).squeeze(-1)
             x = getattr(self, 'pool{}'.format(i))(x, mesh)
 
         x = self.gp(x)
@@ -195,8 +193,8 @@ class MeshEncoderDecoder(nn.Module):
         fe = self.decoder((fe, meshes), before_pool)
         return fe
 
-    def __call__(self, x, meshes):
-        return self.forward(x, meshes)
+    # def __call__(self, x, meshes):
+    #     return self.forward(x, meshes)
 
 class DownConv(nn.Module):
     def __init__(self, in_channels, out_channels, blocks=0, pool=0):
@@ -214,8 +212,8 @@ class DownConv(nn.Module):
         if pool:
             self.pool = MeshPool(pool)
 
-    def __call__(self, x):
-        return self.forward(x)
+    # def __call__(self, x):
+    #     return self.forward(x)
 
     def forward(self, x):
         fe, meshes = x
@@ -263,14 +261,15 @@ class UpConv(nn.Module):
         if unroll:
             self.unroll = MeshUnpool(unroll)
 
-    def __call__(self, x, from_down=None):
-        return self.forward(x, from_down)
+    # def __call__(self, x, from_down=None):
+    #     return self.forward(x, from_down)
 
-    def forward(self, x, from_down):
+    def forward(self, x, from_down=None):
         from_up, meshes = x
         x1 = self.up_conv(from_up, meshes).squeeze(3)
         if self.unroll:
             x1 = self.unroll(x1, meshes)
+        # concatenate skip connections from down-sampling
         if self.transfer_data:
             x1 = torch.cat((x1, from_down), 1)
         x1 = self.conv1(x1, meshes)
@@ -345,8 +344,8 @@ class MeshEncoder(nn.Module):
                     fe = F.relu(fe)
         return fe, encoder_outs
 
-    def __call__(self, x):
-        return self.forward(x)
+    # def __call__(self, x):
+    #     return self.forward(x)
 
 
 class MeshDecoder(nn.Module):
@@ -375,8 +374,8 @@ class MeshDecoder(nn.Module):
         fe = self.final_conv((fe, meshes))
         return fe
 
-    def __call__(self, x, encoder_outs=None):
-        return self.forward(x, encoder_outs)
+    # def __call__(self, x, encoder_outs=None):
+    #     return self.forward(x, encoder_outs)
 
 def reset_params(model): # todo replace with my init
     for i, m in enumerate(model.modules()):

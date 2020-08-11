@@ -8,9 +8,6 @@ class MeshUnpool(nn.Module):
         super(MeshUnpool, self).__init__()
         self.unroll_target = unroll_target
 
-    def __call__(self, features, meshes):
-        return self.forward(features, meshes)
-
     def pad_groups(self, group, unroll_start):
         start, end = group.shape
         padding_rows =  unroll_start - start

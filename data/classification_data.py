@@ -4,8 +4,11 @@ import pickle
 import numpy as np
 from torch.utils.data import Dataset
 from util.util import is_mesh_file
+from utils import get_mesh_path
 from models.layers.mesh import Mesh, PartMesh
 import math
+import pickle
+from pathlib import Path
 
 
 class Rescale(object):
@@ -69,18 +72,25 @@ class ClassificationData(Dataset):
         opt.input_nc = self.transforms.ninput_channels
 
     def __getitem__(self, index):
-        path = self.paths[index][0]
-        mesh = Mesh(file=path, hold_history=False)
-        if mesh.edges_count > 10000:
-            number_of_parts = 2**(math.ceil(math.log(mesh.edges_count/10000, 2)))
-            partMesh = PartMesh(mesh, num_parts=number_of_parts)
-            mesh = partMesh[np.random.randint(number_of_parts)]
+        path = Path(self.paths[index][0])
+        load_path = get_mesh_path(path)
+        if os.path.exists(load_path):
+            mesh = pickle.load(open(load_path, "rb"))
+        else:
+            mesh = Mesh(file=path, hold_history=False)
+            pickle.dump(mesh, open(load_path, "wb"))
+
+        # print(mesh.edges_count, mesh.filename)
+        # if mesh if too large for GPU memory, split and return random part
+        # if mesh.edges_count > 10000 and self.device.type != "cpu":
+        #     number_of_parts = 2**(math.ceil(math.log(mesh.edges_count/10000, 2)))
+        #     partMesh = PartMesh(mesh, num_parts=number_of_parts)
+        #     mesh = partMesh[np.random.randint(number_of_parts)]
 
         label = self.paths[index][1]
         style = self.paths[index][2]
 
         # get edge features
-        mesh.extract_meshCNN_features()
         if self.transforms is not None:
             edge_features = self.transforms(mesh.features)
         meta = {'mesh': mesh, 'edge_features': edge_features, 'label': label, 'style': style}
@@ -95,10 +105,12 @@ class ClassificationData(Dataset):
     def find_classes(dir):
         classes, styles = [], []
         for folder in os.listdir(dir):
-            if os.path.isdir(os.path.join(dir, folder)):
+            if os.path.isdir(os.path.join(dir, folder)) and not folder.startswith("."):
                 classes.append(folder)
+                # use train folder to find all possible styles
                 for obj in os.listdir(os.path.join(dir, folder, "train")):
-                    styles.append(obj[:obj.find("_")])
+                    if obj[-4:] == ".obj":
+                        styles.append(obj[:obj.find("_")])
 
         styles = list(set(styles))
         classes.sort()
@@ -115,7 +127,7 @@ class ClassificationData(Dataset):
         dir = os.path.expanduser(dir)
         for target in sorted(os.listdir(dir)):
             d = os.path.join(dir, target)
-            if not os.path.isdir(d):
+            if not os.path.isdir(d) or target.startswith("."):
                 continue
             for root, _, fnames in sorted(os.walk(d)):
                 for fname in sorted(fnames):
@@ -126,4 +138,23 @@ class ClassificationData(Dataset):
                         meshes.append(item)
         return meshes
 
+class subMeshDataset(ClassificationData):
+    def __getitem__(self, index):
+        path = Path(self.paths[index][0])
+        load_path = get_mesh_path(path, "part")
+        if os.path.exists(load_path):
+            partMesh = pickle.load(open(load_path, "rb"))
+        else:
+            mesh = Mesh(file=path, hold_history=False)
+            number_of_parts = 2**(math.ceil(math.log(mesh.edges_count/10000, 2)))
+            partMesh = PartMesh(mesh, num_parts=number_of_parts)
+            pickle.dump(partMesh, open(load_path, "wb"))
+        label = self.paths[index][1]
+        style = self.paths[index][2]
 
+        if self.transforms is not None:
+            for sub_mesh in partMesh.sub_mesh:
+                sub_mesh.features = self.transforms(sub_mesh.features)
+
+        meta = {'partMesh': partMesh, 'label': label, 'style': style}
+        return meta

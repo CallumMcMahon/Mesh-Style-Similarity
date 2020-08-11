@@ -93,7 +93,6 @@ def flip_edges(mesh, prct, faces):
                                 if face_nb == edge_info[2 + (i + 1) % 2]:
                                     edge_faces[cur_edge_key, 2 + idx] = face_id
                 flipped += 1
-    # print(flipped)
     return faces
 
 
@@ -198,11 +197,11 @@ def get_edge_points(mesh):
 
 
 def get_side_points(mesh, edge_id):
-    # if mesh.gemm_edges[edge_id, side] == -1:
-    #     return mesh.get_side_points(edge_id, ((side + 2) % 4))
-    # else:
+    """ if a boundary is detected, use the available triangle twice
+    This should lead to 0 dihedral angle, and a copy of the face-specific features to the missing face """
     edge_a = mesh.edges[edge_id]
 
+    # if a side is unavailable, copy the available side's edges
     if mesh.gemm_edges[edge_id, 0] == -1:
         edge_b = mesh.edges[mesh.gemm_edges[edge_id, 2]]
         edge_c = mesh.edges[mesh.gemm_edges[edge_id, 3]]
@@ -215,16 +214,18 @@ def get_side_points(mesh, edge_id):
     else:
         edge_d = mesh.edges[mesh.gemm_edges[edge_id, 2]]
         edge_e = mesh.edges[mesh.gemm_edges[edge_id, 3]]
+
+    #
     first_vertex = 0
-    second_vertex = 0
     third_vertex = 0
+    forth_vertex = 0
     if edge_a[1] in edge_b:
         first_vertex = 1
     if edge_b[1] in edge_c:
-        second_vertex = 1
-    if edge_d[1] in edge_e:
         third_vertex = 1
-    return [edge_a[first_vertex], edge_a[1 - first_vertex], edge_b[second_vertex], edge_d[third_vertex]]
+    if edge_d[1] in edge_e:
+        forth_vertex = 1
+    return [edge_a[first_vertex], edge_a[1 - first_vertex], edge_b[third_vertex], edge_d[forth_vertex]]
 
 
 def get_normals(mesh, edge_points, side):

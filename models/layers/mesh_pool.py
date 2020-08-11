@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from models.layers.mesh_union import MeshUnion
 import numpy as np
+from torch.nn.utils.rnn import pad_sequence
 
 
 class MeshPool(nn.Module):
@@ -13,9 +14,6 @@ class MeshPool(nn.Module):
         self.__updated_fe = None
         self.__meshes = None
 
-    def __call__(self, fe, meshes):
-        return self.forward(fe, meshes)
-
     def forward(self, fe, meshes):
         self.__updated_fe = [[] for _ in range(len(meshes))]
         self.__fe = fe
@@ -23,18 +21,23 @@ class MeshPool(nn.Module):
         # iterate over batch
         for mesh_index in range(len(meshes)):
             self.__pool_main(mesh_index)
-        out_features = torch.cat(self.__updated_fe).view(len(meshes), -1, self.__out_target)
+        #out_features = torch.cat(self.__updated_fe).view(len(meshes), -1, self.__out_target)
+        # if impossible to pool any further
+        out_features = pad_sequence([feat.T for feat in self.__updated_fe], batch_first=True).transpose(1, 2)
         return out_features
 
     def __pool_main(self, mesh_index):
         mesh = self.__meshes[mesh_index]
         fe = self.__fe[mesh_index, :, :mesh.edges_count]
+        # magnitude of features
         in_fe_sq = torch.sum(fe ** 2, dim=0)
         sorted, edge_ids = torch.sort(in_fe_sq, descending=True)
         edge_ids = edge_ids.tolist()
+        # keep track of already collapsed edges
         mask = np.ones(mesh.edges_count, dtype=np.bool)
         edge_groups = MeshUnion(mesh.edges_count, self.__fe.device)
-        while mesh.edges_count > self.__out_target:
+        while mesh.edges_count > self.__out_target and len(edge_ids) > 0:
+            # retrieve the smallest edge of those remaining
             edge_id = edge_ids.pop()
             if mask[edge_id]:
                 self.__pool_edge(mesh, edge_id, mask, edge_groups)
@@ -59,9 +62,15 @@ class MeshPool(nn.Module):
             return False
 
     def __clean_side(self, mesh, edge_id, mask, edge_groups, side):
+        # shouldn't need this, already checked in __pool_main while loop
         if mesh.edges_count <= self.__out_target:
             return False
         invalid_edges = MeshPool.__get_invalids(mesh, edge_id, edge_groups, side)
+        # stop pooling if connected component pooled to a single triangle
+        if invalid_edges is None:
+            return False
+        # keep collapsing triplets (vertex with only three edges)
+        # until no triplet, sufficient pooling, or single triangle left
         while len(invalid_edges) != 0 and mesh.edges_count > self.__out_target:
             self.__remove_triplete(mesh, mask, edge_groups, invalid_edges)
             if mesh.edges_count <= self.__out_target:
@@ -69,10 +78,14 @@ class MeshPool(nn.Module):
             if self.has_boundaries(mesh, edge_id):
                 return False
             invalid_edges = self.__get_invalids(mesh, edge_id, edge_groups, side)
+            if invalid_edges is None:
+                return False
         return True
 
     @staticmethod
     def has_boundaries(mesh, edge_id):
+        # checks if edge is on a boundary, by checking if each edge in 1-ring has 4 neighbours
+        # avoids edge collapse without connected faces leaving edge and no face
         for edge in mesh.gemm_edges[edge_id]:
             if edge == -1 or -1 in mesh.gemm_edges[edge]:
                 return True
@@ -80,6 +93,8 @@ class MeshPool(nn.Module):
 
     @staticmethod
     def __is_one_ring_valid(mesh, edge_id):
+        # get all vertices connected to each end of edge_id
+        # the set of vertices present in both should be 2 (third vertex of ONLY 2 faces connected)
         v_a = set(mesh.edges[mesh.ve[mesh.edges[edge_id, 0]]].reshape(-1))
         v_b = set(mesh.edges[mesh.ve[mesh.edges[edge_id, 1]]].reshape(-1))
         shared = v_a & v_b - set(mesh.edges[edge_id])
@@ -101,14 +116,21 @@ class MeshPool(nn.Module):
 
     @staticmethod
     def __get_invalids(mesh, edge_id, edge_groups, side):
+        '''Detects when pooling a face would make 2 connected faces have zero-area.
+        Happens when vertex in common only used for those 3 faces'''
+        # check face is not the only one left in the component
+        if len(set(mesh.gemm_edges[edge_id])) == 2:
+            return None
         info = MeshPool.__get_face_info(mesh, edge_id, side)
         key_a, key_b, side_a, side_b, other_side_a, other_side_b, other_keys_a, other_keys_b = info
         shared_items = MeshPool.__get_shared_items(other_keys_a, other_keys_b)
         if len(shared_items) == 0:
             return []
         else:
+            #if shared edge, then pooling would lead to 2 zero-area faces, bad!
             assert (len(shared_items) == 2)
             middle_edge = other_keys_a[shared_items[0]]
+            # todo change index to other_keys_a[0] and other_keys_b[1]
             update_key_a = other_keys_a[1 - shared_items[0]]
             update_key_b = other_keys_b[1 - shared_items[1]]
             update_side_a = mesh.sides[key_a, other_side_a + 1 - shared_items[0]]
@@ -134,6 +156,9 @@ class MeshPool(nn.Module):
 
     @staticmethod
     def __get_shared_items(list_a, list_b):
+        """compares lists of edges and finds edges in common
+        badly written, only expects one element in common.
+        return[0] is idx of element in first list, return[1] is idx of same element in second list"""
         shared_items = []
         for i in range(len(list_a)):
             for j in range(len(list_b)):
@@ -146,13 +171,18 @@ class MeshPool(nn.Module):
         return side + 1 - 2 * (side % 2)
 
     @staticmethod
-    def __get_face_info(mesh, edge_id, side):
+    def __get_face_info(mesh, edge_id, side) -> (int, int, int, int, int, int, list, list):
+        ''' gets edge idxs of face on side "side" connected to edge_id
+        also gets edges of faces connected to the relevant face
+        '''
         key_a = mesh.gemm_edges[edge_id, side]
         key_b = mesh.gemm_edges[edge_id, side + 1]
+        # logic to determine position and subsequently edge idx of other two edges connected to edge_a and edge_b
         side_a = mesh.sides[edge_id, side]
         side_b = mesh.sides[edge_id, side + 1]
         other_side_a = (side_a - (side_a % 2) + 2) % 4
         other_side_b = (side_b - (side_b % 2) + 2) % 4
+        # list of the two edges making the other face connected to edge a
         other_keys_a = [mesh.gemm_edges[key_a, other_side_a], mesh.gemm_edges[key_a, other_side_a + 1]]
         other_keys_b = [mesh.gemm_edges[key_b, other_side_b], mesh.gemm_edges[key_b, other_side_b + 1]]
         return key_a, key_b, side_a, side_b, other_side_a, other_side_b, other_keys_a, other_keys_b

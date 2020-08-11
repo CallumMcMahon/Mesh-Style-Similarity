@@ -96,46 +96,38 @@ def export(file, vs, faces, vn=None, color=None):
             f.write("f %d %d %d\n" % (face[0] + 1, face[1] + 1, face[2] + 1))
 
 
+def export_segments(file, segments):
+    if not self.export_folder:
+        return
+    cur_segments = segments
+    for i in range(self.pool_count + 1):
+        filename, file_extension = os.path.splitext(self.filename)
+        file = '%s/%s_%d%s' % (self.export_folder, filename, i, file_extension)
+        fh, abs_path = mkstemp()
+        edge_key = 0
+        with os.fdopen(fh, 'w') as new_file:
+            with open(file) as old_file:
+                for line in old_file:
+                    if line[0] == 'e':
+                        new_file.write('%s %d' % (line.strip(), cur_segments[edge_key]))
+                        if edge_key < len(cur_segments):
+                            edge_key += 1
+                            new_file.write('\n')
+                    else:
+                        new_file.write(line)
+        os.remove(file)
+        move(abs_path, file)
+        if i < len(self.history_data['edges_mask']):
+            cur_segments = segments[:len(self.history_data['edges_mask'][i])]
+            cur_segments = cur_segments[self.history_data['edges_mask'][i]]
+
+
 def random_file_name(ext, prefix='temp'):
     return f'{prefix}{uuid.uuid4()}.{ext}'
 
 
-def get_mesh_path(file: str, about: str, num_aug: int = 0):
-    # np.random.randint(0, num_aug)
-    load_file = file.parent/"cache"/(file.stem + "_" + about + ".npz")
-    if not os.path.isdir(file.parent/"cache"):
-        os.makedirs(file.parent/"cache", exist_ok=True)
+def get_mesh_path(file: str, about: str = "", fileType: str = ".pkl"):
+    load_file = file.parent / "cache" / (file.stem + "_" + about + fileType)
+    if not os.path.isdir(file.parent / "cache"):
+        os.makedirs(file.parent / "cache", exist_ok=True)
     return load_file
-
-
-def remove_non_manifolds(mesh, faces):
-    '''
-    :param mesh:
-    :param faces:
-    :return: subset of faces which do not break the 1-ring assumption
-    '''
-    mesh.ve = [[] for _ in mesh.vs]
-    edges_set = set()
-    # True values in mask are manifold and are kept
-    mask = np.ones(len(faces), dtype=bool)
-    _, face_areas = compute_face_normals_and_areas(mesh, faces)
-    for face_id, face in enumerate(faces):
-        if face_areas[face_id] == 0:
-            mask[face_id] = False
-            continue
-        faces_edges = []
-        is_manifold = True
-        for i in range(3):
-            cur_edge = (face[i], face[(i + 1) % 3])
-            # each edge added twice, as (a, b) and (b, a). stop edge from being added third time
-            if cur_edge in edges_set:
-                is_manifold = False
-                break
-            else:
-                faces_edges.append(cur_edge)
-        if not is_manifold:
-            mask[face_id] = False
-        else:
-            for idx, edge in enumerate(faces_edges):
-                edges_set.add(edge)
-    return faces[mask], face_areas[mask]

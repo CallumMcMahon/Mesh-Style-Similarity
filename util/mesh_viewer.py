@@ -83,12 +83,15 @@ def parse_obje(obj_file, scale_by):
     edges = []
 
     def add_to_edges():
+        # list of edges for each segmentation class
         if edge_c >= len(edges):
+            # add empty lists until there are as many as segmentation class
             for _ in range(len(edges), edge_c + 1):
                 edges.append([])
         edges[edge_c].append(edge_v)
 
     def fix_vertices():
+        # swap y and z coordinates and potentially scale so widest dimension has length 1
         nonlocal vs, scale_by
         vs = V(vs)
         z = vs[:, 2].copy()
@@ -114,9 +117,13 @@ def parse_obje(obj_file, scale_by):
                 vs.append([float(v) for v in splitted_line[1:]])
             elif splitted_line[0] == 'f':
                 faces.append([int(c) - 1 for c in splitted_line[1:]])
+            # define edge "e" lines in file, non-standard file format
             elif splitted_line[0] == 'e':
                 if len(splitted_line) >= 4:
+                    # decrease vertex index by one for both edge of edge
+                    # TODO is this correction needed
                     edge_v = [int(c) - 1 for c in splitted_line[1:-1]]
+                    # last number in line is an integer representing segmentation color
                     edge_c = int(splitted_line[-1])
                     add_to_edges()
 
