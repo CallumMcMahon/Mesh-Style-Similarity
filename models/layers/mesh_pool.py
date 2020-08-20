@@ -22,8 +22,8 @@ class MeshPool(nn.Module):
         for mesh_index in range(len(meshes)):
             self.__pool_main(mesh_index)
         #out_features = torch.cat(self.__updated_fe).view(len(meshes), -1, self.__out_target)
-        # if impossible to pool any further
-        out_features = pad_sequence([feat.T for feat in self.__updated_fe], batch_first=True).transpose(1, 2)
+        # if impossible to pool to required amount, pad all meshes
+        out_features = pad_sequence([feat for feat in self.__updated_fe], batch_first=True).transpose(1, 2)
         return out_features
 
     def __pool_main(self, mesh_index):

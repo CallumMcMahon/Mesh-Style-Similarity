@@ -78,48 +78,54 @@ def load_obj(file):
     return vs, faces
 
 
-colorRGB = [[0, 0, 255], [0, 255, 0], [255, 0, 0], [255, 102, 255], [255, 128, 0], [127, 0, 255], [238, 130, 238],
+RGBs = [[0, 0, 255], [0, 255, 0], [255, 0, 0], [255, 102, 255], [255, 128, 0], [127, 0, 255], [238, 130, 238],
             [255, 99, 71], [255, 255, 0], [0, 255, 255], [255, 0, 255], [200, 121, 0]]
 
 
-def export(file, vs, faces, vn=None, color=None):
+def export(file, vs, faces, edges=None, ve=None, v_color=None, e_color=None):
+    # exports mesh with potential vertex or edge coloring
+    # edge coloring idea from https://stackoverflow.com/questions/44278650/coloring-mesh-edges-in-meshlab
     with open(file, 'w+') as f:
         for vi, v in enumerate(vs):
-            if color is None:
-                f.write("v %f %f %f\n" % (v[0], v[1], v[2]))
+            if v_color is not None:
+                f.write("v {} {} {} {} {} {}\n".format(v[0], v[1], v[2], *v_color[vi]))
+            elif e_color is not None and ve is not None:
+                mean_color = e_color[ve[vi]].mean(0)
+                f.write("v {} {} {} {} {} {}\n".format(v[0], v[1], v[2], *mean_color))
             else:
-                f.write("v %f %f %f %f %f %f\n" % (v[0], v[1], v[2], colorRGB[color[vi]][0],
-                                                   colorRGB[color[vi]][1], colorRGB[color[vi]][2]))
-            if vn is not None:
-                f.write("vn %f %f %f\n" % (vn[vi, 0], vn[vi, 1], vn[vi, 2]))
+                f.write("v {} {} {}\n".format(v[0], v[1], v[2]))
+
+        if e_color is not None:
+            index = vs.shape[0]
+            extra_faces = []
+            for edge in edges:
+                # midpoint
+                m = vs[[edge[0], edge[1]]].mean(0)
+                f.write("v {} {} {} {} {} {}\n".format(m[0], m[1], m[2], *e_color[vi]))
+                index += 1
+                extra_faces.append("f {} {} {}\n".format(edge[0]+1, index, edge[1]+1))
+
         for face in faces:
-            f.write("f %d %d %d\n" % (face[0] + 1, face[1] + 1, face[2] + 1))
+            f.write("f {} {} {}\n".format(face[0] + 1, face[1] + 1, face[2] + 1))
+        if e_color is not None:
+            for face in extra_faces:
+                f.write(face)
 
 
-def export_segments(file, segments):
-    if not self.export_folder:
-        return
-    cur_segments = segments
-    for i in range(self.pool_count + 1):
-        filename, file_extension = os.path.splitext(self.filename)
-        file = '%s/%s_%d%s' % (self.export_folder, filename, i, file_extension)
-        fh, abs_path = mkstemp()
-        edge_key = 0
-        with os.fdopen(fh, 'w') as new_file:
-            with open(file) as old_file:
-                for line in old_file:
-                    if line[0] == 'e':
-                        new_file.write('%s %d' % (line.strip(), cur_segments[edge_key]))
-                        if edge_key < len(cur_segments):
-                            edge_key += 1
-                            new_file.write('\n')
-                    else:
-                        new_file.write(line)
-        os.remove(file)
-        move(abs_path, file)
-        if i < len(self.history_data['edges_mask']):
-            cur_segments = segments[:len(self.history_data['edges_mask'][i])]
-            cur_segments = cur_segments[self.history_data['edges_mask'][i]]
+class act_hook():
+    def __init__(self):
+        self.activations = dict()
+
+    def __call__(self, m, input, output):
+        #grab output to layer and store in dict with key as layer name
+        print(m, m.__class__.__name__, ": ", input[0].size())
+        self.activations[m] = output.detach().to("cpu")
+
+def register_hooks(net, layers, is_dataParallel):
+    obj = net.module if is_dataParallel else net
+    act = act_hook()
+    for layer in layers:
+        getattr(obj, layer).register_forward_hook(act)
 
 
 def random_file_name(ext, prefix='temp'):

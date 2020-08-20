@@ -16,7 +16,7 @@ class Mesh:
         if file is None:
             return
         self.filename = Path(file)
-        self.vs = self.v_mask = self.edge_areas = self.color = None
+        self.vs = self.v_mask = self.edge_areas = self.v_color = self.e_color = None
         self.edges = self.gemm_edges = self.sides = None
         self.device = device
         self.create_connectivity(vs, faces)
@@ -281,17 +281,22 @@ class Mesh:
     def merge_vertices(self, edge_id):
         self.remove_edge(edge_id)
         edge = self.edges[edge_id]
-        v_a = self.vs[edge[0]]
-        v_b = self.vs[edge[1]]
+        # v_a = self.vs[edge[0]]
+        # v_b = self.vs[edge[1]]
         # update pA
-        v_a.__iadd__(v_b)
-        v_a.__itruediv__(2)
+        # move first vertex to midpoint of edge
+        self.vs[edge[0]] = self.vs[edge].mean(0)
+        # v_a.__iadd__(v_b)
+        # v_a.__itruediv__(2)
         self.v_mask[edge[1]] = False
+        # replace any references to deleted vertex v_b with v_a
         mask = self.edges == edge[1]
         self.ve[edge[0]].extend(self.ve[edge[1]])
         self.edges[mask] = edge[0]
 
+
     def remove_vertex(self, v):
+        # when 3 touching triangles collapse into 1, "invalid" case in mesh_pool, used by "remove_triplete"
         self.v_mask[v] = False
 
     def remove_edge(self, edge_id):
@@ -305,58 +310,111 @@ class Mesh:
     def clean(self, edges_mask, groups):
         edges_mask = edges_mask.astype(bool)
         torch_mask = torch.from_numpy(edges_mask.copy())
+        # only keep edges and gemm/sides of edges remaining
+        # all vertices kept (with a vs_mask), filtered edge list references original vs indices
         self.gemm_edges = self.gemm_edges[edges_mask]
         self.edges = self.edges[edges_mask]
         self.sides = self.sides[edges_mask]
+
         new_ve = []
         edges_mask = np.concatenate([edges_mask, [False]])
         new_indices = np.zeros(edges_mask.shape[0], dtype=np.int32)
         new_indices[-1] = -1
+        # update indices in gemm to reference smaller set up filtered edges
         new_indices[edges_mask] = np.arange(0, np.ma.where(edges_mask)[0].shape[0])
         self.gemm_edges[:, :] = new_indices[self.gemm_edges[:, :]]
+        # todo: check if we need to filter ve by vs_mask
         for v_index, ve in enumerate(self.ve):
             update_ve = []
-            # if self.v_mask[v_index]:
             for e in ve:
                 update_ve.append(new_indices[e])
             new_ve.append(update_ve)
         self.ve = new_ve
         self.__clean_history(groups, torch_mask)
 
-    def export(self, file):
-        vs = self.vs.cpu().clone().numpy()
+    def export(self, file, history=0, v_color=None, e_color=None):
+        # if rgb values haven't been specified already
+        if e_color.ndim == 1:
+            if e_color.dtype == np.int32:
+                # class coloring
+                RGBs = np.array([[0, 0, 255], [0, 255, 0], [255, 0, 0], [255, 102, 255], [255, 128, 0], [127, 0, 255],
+                                 [238, 130, 238], [255, 99, 71], [255, 255, 0], [0, 255, 255], [255, 0, 255], [200, 121, 0]])
+                e_color = RGBs[e_color]
+            else:
+                e_color = np.stack([e_color * 255, (1-e_color) * 255, np.zeros_like(e_color)]).T
+        vs = self.vs.cpu().clone().numpy() if history is None else self.history_data['vs'][history]
         vs -= self.translations[None, :]
         vs *= self.scale
-        export(file, vs, self.faces, color=self.color)
+        if history is None:
+            export(file, vs, self.faces, self.edges, self.ve, v_color=v_color, e_color=e_color)
+        else:
+            v_mask = self.history_data['v_mask'][history]
+            vs = vs[v_mask]
+            new_indices = np.zeros(v_mask.shape[0], dtype=np.int32)
+            new_indices[v_mask] = np.arange(0, np.ma.where(v_mask)[0].shape[0])
+            gemm = self.history_data['gemm_edges'][history]
+            sides = self.history_data['sides'][history]
+            edges = self.history_data["edges"][history]
+            ve = self.history_data["ve"][history]
+            faces = []
+            assert e_color.shape[0] == gemm.shape[0]
+            #assert (sum([any([i != x for x in gemm[gemm[i], sides[i]]]) for i in range(gemm.shape[0])]) == 0)
+            for edge_index in range(len(gemm)):
+                cycles = self.__get_cycle(sides, gemm, edge_index)
+                for cycle in cycles:
+                    faces.append(self.__cycle_to_face(edges, cycle, new_indices))
+            edges = new_indices[edges]
+            export(file, vs, faces, edges, ve, v_color=v_color, e_color=e_color)
 
-    def export_segments(self, file, segments):
-        cur_segments = segments
-        edge_key = 0
-        with os.fdopen(fh, 'w') as new_file:
-            with open(file) as old_file:
-                for line in old_file:
-                    if line[0] == 'e':
-                        new_file.write('%s %d' % (line.strip(), cur_segments[edge_key]))
-                        if edge_key < len(cur_segments):
-                            edge_key += 1
-                            new_file.write('\n')
-                    else:
-                        new_file.write(line)
-        os.remove(file)
-        move(abs_path, file)
-        if i < len(self.history_data['edges_mask']):
-            cur_segments = segments[:len(self.history_data['edges_mask'][i])]
-            cur_segments = cur_segments[self.history_data['edges_mask'][i]]
+    @staticmethod
+    def __get_cycle(sides, gemm, edge_id):
+        cycles = []
+        # each edge has two faces connected to it
+        for j in range(2):
+            next_side = start_point = j * 2
+            next_key = edge_id
+            # if edge is on boundary, skip
+            if gemm[edge_id, start_point] == -1:
+                continue
+            cycles.append([])
+            for i in range(3):
+                # view face from perspective of all 3 edges
+                tmp_next_key = gemm[next_key, next_side]
+                tmp_next_side = sides[next_key, next_side]
+                # make sure next edge to focus on is not current or past visited edge
+                tmp_next_side = tmp_next_side + 1 - 2 * (tmp_next_side % 2)
+                # set edges to -1 so if face comes up again, know not to add it. Not convinced it's needed...
+                gemm[next_key, next_side] = -1
+                gemm[next_key, next_side + 1 - 2 * (next_side % 2)] = -1
+                # hope to next edge in face
+                next_key = tmp_next_key
+                next_side = tmp_next_side
+                cycles[-1].append(next_key)
+        return cycles
+
+    @staticmethod
+    def __cycle_to_face(edges, cycle, v_indices):
+        face = []
+        for i in range(3):
+            v = list(set(edges[cycle[i]]) & set(edges[cycle[(i + 1) % 3]]))[0]
+            face.append(v_indices[v])
+        return face
 
     # TODO add export segmentation
 
     def init_history(self):
         self.history_data = {
-                               'groups': [],
-                               'gemm_edges': [self.gemm_edges.copy()],
-                               'occurrences': [],
-                               'edges_count': [self.edges_count],
-                              }
+            'groups': [],
+            'gemm_edges': [self.gemm_edges.copy()],
+            'occurrences': [],
+            'edges_count': [self.edges_count],
+            # export info
+            'vs': [self.vs],
+            'sides': [self.sides],
+            'v_mask': [torch.ones(self.vs.shape[0], dtype=torch.bool)],
+            'edges': [np.copy(self.edges)],
+            've': [np.copy(self.ve)],
+            }
 
     def get_groups(self):
         return self.history_data['groups'].pop()
@@ -366,10 +424,18 @@ class Mesh:
     
     def __clean_history(self, groups, pool_mask):
         if self.history_data is not None:
+            #edges and ve get overwritten with subset each pooling, vs gets masked
             self.history_data['occurrences'].append(groups.get_occurrences())
             self.history_data['groups'].append(groups.get_groups(pool_mask))
             self.history_data['gemm_edges'].append(self.gemm_edges.copy())
             self.history_data['edges_count'].append(self.edges_count)
+            # export info
+            self.history_data['vs'].append(self.vs.cpu().clone().numpy())
+            self.history_data['sides'].append(self.sides.copy())
+            self.history_data['v_mask'].append(np.copy(self.v_mask))
+            self.history_data['edges'].append(np.copy(self.edges))
+            self.history_data['ve'].append(np.copy(self.ve))
+
     
     def unroll_gemm(self):
         self.history_data['gemm_edges'].pop()
@@ -456,7 +522,7 @@ class PartMesh:
         new_vs = new_vs / new_vs_n[:, None]
         new_vs[new_vs_n == 0, :] = self.main_mesh.vs[new_vs_n == 0, :]
         self.main_mesh.update_verts(new_vs)
-        self.main_mesh.color = colors
+        self.main_mesh.v_color = colors
 
     def export(self, file, build_main=True):
         """

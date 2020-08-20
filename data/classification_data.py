@@ -3,6 +3,7 @@ import torch
 import pickle
 import numpy as np
 from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
 from util.util import is_mesh_file
 from utils import get_mesh_path
 from models.layers.mesh import Mesh, PartMesh
@@ -10,6 +11,19 @@ import math
 import pickle
 from pathlib import Path
 
+def collate_fn(batch):
+    """Creates mini-batch tensors
+    We should build custom collate_fn rather than using default collate_fn
+    """
+    meta = {}
+    keys = ['mesh', 'label', 'style']
+    for key in keys:
+        meta[key] = np.array([d[key] for d in batch])
+    meta['label'] = torch.from_numpy(meta['label']).long()
+    meta['style'] = torch.from_numpy(meta['style']).long()
+    meta['edge_features'] = pad_sequence([d['edge_features'].float().T for d in batch],
+                                         batch_first=True).transpose(1,2)
+    return meta
 
 class Rescale(object):
     """ Computes Mean and Standard Deviation from Training Data
@@ -91,7 +105,9 @@ class ClassificationData(Dataset):
         style = self.paths[index][2]
 
         # get edge features
-        if self.transforms is not None:
+        if self.transforms is None:
+            edge_features = mesh.features
+        else:
             edge_features = self.transforms(mesh.features)
         meta = {'mesh': mesh, 'edge_features': edge_features, 'label': label, 'style': style}
         return meta

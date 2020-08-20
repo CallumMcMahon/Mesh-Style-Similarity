@@ -5,6 +5,9 @@ import pickle
 
 from sklearn import manifold
 from sklearn.cluster import MiniBatchKMeans, KMeans, AgglomerativeClustering, DBSCAN
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+
 
 tsne = manifold.TSNE(n_components=2, init='random', random_state=0, perplexity=50)
 act = pickle.load(open("data/shrec_leg_Activations.pkl", "rb"))
@@ -19,18 +22,8 @@ for layer_num, layer in enumerate(act):
             gram[i].append((mesh_feat.T@mesh_feat).reshape(-1) / mesh_feat.shape[0])
         gram[i] = torch.stack(gram[i])
 
-    tsneData = torch.cat(gram)
-    Y = tsne.fit_transform(tsneData)
-    torch.save(Y, 'data/gramTsne.pt')
-    Y = torch.load('data/gramTsne.pt')
-
-    n_dataPoints = [gram[i].shape[0] for i in range(3)]
-    pts_idx = [sum(n_dataPoints[:i]) for i in range(1, len(n_dataPoints)+1)]
-
-    fig = plt.figure()
-    plt.scatter(Y[:pts_idx[0], 0], Y[:pts_idx[0], 1], c="r", alpha=0.1)
-    plt.scatter(Y[pts_idx[0]:pts_idx[1], 0], Y[pts_idx[0]:pts_idx[1], 1], c="g", alpha=0.1)
-    plt.scatter(Y[pts_idx[1]:pts_idx[2], 0], Y[pts_idx[1]:pts_idx[2], 1], c="b", alpha=0.1)
-    plt.show()
-    fig.savefig('outputs/cabrioleVSsmoothVSstraightGram{}.png'.format(layer_num))
-pass
+    gram_agglomerated = torch.cat(gram)
+    labels = [i for i in range(3) for x in range(gram[i].shape[0])]
+    pca = PCA(n_components=10).fit_transform(gram_agglomerated)
+    clf = LogisticRegression(random_state=0, max_iter=10000, C=0.1).fit(pca, labels).score(pca, labels)
+    print("layer:", layer_num, "accuracy:", clf)
