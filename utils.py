@@ -111,6 +111,21 @@ def export(file, vs, faces, edges=None, ve=None, v_color=None, e_color=None):
             for face in extra_faces:
                 f.write(face)
 
+def convert_to_grayscale(im_as_arr):
+    # adapted from https://github.com/utkuozbulak/pytorch-cnn-visualizations
+    """
+        Converts edge feature gradients to grayscale
+    Args:
+        im_as_arr (numpy arr): features per edge with shape (C, E)
+    returns:
+        grayscale_im (numpy_arr): Grayscale labels with shape (E)
+    """
+    grayscale_im = np.sum(np.abs(im_as_arr), axis=0)
+    im_max = np.percentile(grayscale_im, 99)
+    im_min = np.min(grayscale_im)
+    grayscale_im = (np.clip((grayscale_im - im_min) / (im_max - im_min), 0, 1))
+    return grayscale_im
+
 
 class act_hook():
     def __init__(self):
@@ -118,7 +133,7 @@ class act_hook():
 
     def __call__(self, m, input, output):
         #grab output to layer and store in dict with key as layer name
-        print(m, m.__class__.__name__, ": ", input[0].size())
+        print(m, m.__class__.__name__, ": ", input[0].size(), input[1].edges_count)
         self.activations[m] = output.detach().to("cpu")
 
 def register_hooks(net, layers, is_dataParallel):

@@ -7,3 +7,11 @@
 checkpoints
 datasets
 runs
+/logs/
+/lightning_logs/
+/default/
+/checkpoints/
+/pretrained_model_files/
+/util/
+/util/
+/util/

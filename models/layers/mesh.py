@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from queue import Queue
-from utils import load_obj, export, get_mesh_path
+from utils import load_obj, export, convert_to_grayscale, get_mesh_path
 from models.layers.mesh_prepare import extract_features
 import copy
 from pathlib import Path
@@ -113,6 +113,9 @@ class Mesh:
         self.ve_in = torch.from_numpy(np.concatenate(np.array(ve_in)).ravel()).to(self.device).long()
         self.max_nvs = max(self.nvs)
         self.nvs = torch.Tensor(self.nvs).to(self.device).float()
+        for i in range(self.gemm_edges.shape[0]):
+            for idx, j in enumerate(self.gemm_edges[self.gemm_edges[i], self.sides[i]]):
+                assert j == i or self.gemm_edges[i, idx] == -1
 
     def build_ef(self):
         edge_faces = dict()
@@ -334,13 +337,16 @@ class Mesh:
 
     def export(self, file, history=0, v_color=None, e_color=None):
         # if rgb values haven't been specified already
-        if e_color.ndim == 1:
+        if e_color.ndim != 3:
+            # int per class
             if e_color.dtype == np.int32:
-                # class coloring
                 RGBs = np.array([[0, 0, 255], [0, 255, 0], [255, 0, 0], [255, 102, 255], [255, 128, 0], [127, 0, 255],
                                  [238, 130, 238], [255, 99, 71], [255, 255, 0], [0, 255, 255], [255, 0, 255], [200, 121, 0]])
                 e_color = RGBs[e_color]
+            # float values to be mapped to intensity
             else:
+                # rescale values
+                e_color = convert_to_grayscale(e_color)
                 e_color = np.stack([e_color * 255, (1-e_color) * 255, np.zeros_like(e_color)]).T
         vs = self.vs.cpu().clone().numpy() if history is None else self.history_data['vs'][history]
         vs -= self.translations[None, :]
@@ -358,13 +364,32 @@ class Mesh:
             ve = self.history_data["ve"][history]
             faces = []
             assert e_color.shape[0] == gemm.shape[0]
-            #assert (sum([any([i != x for x in gemm[gemm[i], sides[i]]]) for i in range(gemm.shape[0])]) == 0)
+            for i in range(self.gemm_edges.shape[0]):
+                for idx, j in enumerate(self.gemm_edges[self.gemm_edges[i], self.sides[i]]):
+                    assert j == i or self.gemm_edges[i, idx] == -1
             for edge_index in range(len(gemm)):
-                cycles = self.__get_cycle(sides, gemm, edge_index)
+                cycles = self.__get_cycle2(sides, gemm, edge_index)
                 for cycle in cycles:
                     faces.append(self.__cycle_to_face(edges, cycle, new_indices))
+            # deduplicate_faces = []
+            # for face in faces:
+            #     if face not in deduplicate_faces:
+            #         deduplicate_faces.append(face)
+            # faces = deduplicate_faces
             edges = new_indices[edges]
             export(file, vs, faces, edges, ve, v_color=v_color, e_color=e_color)
+
+    @staticmethod
+    def __get_cycle2(sides, gemm, edge_id):
+        cycles = []
+        # each edge has two faces connected to it
+        for j in range(2):
+            start_point = j * 2
+            # if edge is on boundary, skip
+            if gemm[edge_id, start_point] == -1:
+                continue
+            cycles.append([edge_id, gemm[edge_id, start_point], gemm[edge_id, start_point+1]])
+        return cycles
 
     @staticmethod
     def __get_cycle(sides, gemm, edge_id):
@@ -386,18 +411,26 @@ class Mesh:
                 # set edges to -1 so if face comes up again, know not to add it. Not convinced it's needed...
                 gemm[next_key, next_side] = -1
                 gemm[next_key, next_side + 1 - 2 * (next_side % 2)] = -1
-                # hope to next edge in face
+                # hop to next edge in face
                 next_key = tmp_next_key
                 next_side = tmp_next_side
                 cycles[-1].append(next_key)
         return cycles
 
     @staticmethod
+    def __cycle_to_face2(edges, cycle, v_indices):
+        face = list(np.unique(edges[cycle]))
+        assert len(face) == 3
+        return face
+
+    @staticmethod
     def __cycle_to_face(edges, cycle, v_indices):
+        # turns 3 edges of face in correspoding 3 vertices in semantic order
         face = []
         for i in range(3):
-            v = list(set(edges[cycle[i]]) & set(edges[cycle[(i + 1) % 3]]))[0]
-            face.append(v_indices[v])
+            v = list(set(edges[cycle[i]]) & set(edges[cycle[(i + 1) % 3]]))
+            assert len(v)>0
+            face.append(v_indices[v[0]])
         return face
 
     # TODO add export segmentation
@@ -409,12 +442,13 @@ class Mesh:
             'occurrences': [],
             'edges_count': [self.edges_count],
             # export info
-            'vs': [self.vs],
-            'sides': [self.sides],
+            'vs': [self.vs.cpu().clone().numpy()],
+            'sides': [self.sides.copy()],
             'v_mask': [torch.ones(self.vs.shape[0], dtype=torch.bool)],
             'edges': [np.copy(self.edges)],
             've': [np.copy(self.ve)],
             }
+
 
     def get_groups(self):
         return self.history_data['groups'].pop()
@@ -424,7 +458,7 @@ class Mesh:
     
     def __clean_history(self, groups, pool_mask):
         if self.history_data is not None:
-            #edges and ve get overwritten with subset each pooling, vs gets masked
+            #edges and ve get overwritten with subset each pooling, vs gets masked (and mutated in pool)
             self.history_data['occurrences'].append(groups.get_occurrences())
             self.history_data['groups'].append(groups.get_groups(pool_mask))
             self.history_data['gemm_edges'].append(self.gemm_edges.copy())

@@ -52,7 +52,7 @@ if __name__ == '__main__':
 
     input_file = "Leg/remeshed/Cabriole_5.obj"
     output_file = "Leg_Cabriole_5Conv"
-    depth = 1
+    depth = 0
     # input_file = "chair/remeshed/Ming_2.obj"
     # output_file = "chair_Ming_2Conv2"
     meshActivations = []
@@ -66,7 +66,7 @@ if __name__ == '__main__':
     tsne = manifold.TSNE(n_components=2, init='random', random_state=0, perplexity=80)
     Y = tsne.fit_transform(X)
 
-    cluster = KMeans(n_clusters=3, random_state=0)
+    cluster = KMeans(n_clusters=2, random_state=0)
 
     RGBs = np.array([[0, 0, 255], [0, 255, 0], [255, 0, 0], [255, 102, 255], [255, 128, 0], [127, 0, 255],
                      [238, 130, 238], [255, 99, 71], [255, 255, 0], [0, 255, 255], [255, 0, 255], [200, 121, 0]])

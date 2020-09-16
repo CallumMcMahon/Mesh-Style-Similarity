@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 
 from options.train_options import TrainOptions
 from options.test_options import TestOptions
@@ -20,13 +21,17 @@ from sklearn import manifold
 from sklearn.cluster import MiniBatchKMeans, KMeans, DBSCAN
 from sklearn.mixture import GaussianMixture
 
-activations = dict()
+activations = []
 
 
 def act_hook(m, input, output, name=None):
     # grab output to layer and store in dict with key as layer name
-    print(m.__class__.__name__, ": ", input[0].size())
-    activations[name] = output#.detach().to("cpu")
+    print(m.__class__.__name__, ": ", input[0].size(), input[1][0].edges_count)
+    # activations[name] = output#.detach().to("cpu")
+    while len(activations)< len(input[1]):
+        activations.append([])
+    for i, mesh in enumerate(input[1]):
+        activations[i].append(output[i, :, :input[1][i].edges_count, 0])
 
 
 def register_hooks(net, layers, is_dataParallel):
@@ -34,6 +39,15 @@ def register_hooks(net, layers, is_dataParallel):
     for layer in layers:
         getattr(obj, layer).register_forward_hook(partial(act_hook, name=layer))
 
+
+def gram_loss(act, layers=None):
+    layers = range(len(act[0])) if layers is None else layers
+    loss = 0
+    for layer in layers:
+        gram1 = act[0][layer] @ act[0][layer].T
+        gram2 = act[1][layer] @ act[1][layer].T
+        loss += F.mse_loss(gram1, gram2)
+    return loss
 
 RGBs = np.array([[0, 0, 255], [0, 255, 0], [255, 0, 0], [255, 102, 255], [255, 128, 0], [127, 0, 255],
                  [238, 130, 238], [255, 99, 71], [255, 255, 0], [0, 255, 255], [255, 0, 255], [200, 121, 0]])
@@ -57,36 +71,31 @@ if __name__ == '__main__':
     stateDict = torch.load("pretrained_model_files/shrec_pretrained.pth")
     layers = ["conv{}".format(i) for i in range(4)]
     net.load_state_dict(stateDict, strict=False)
-    net.train().requires_grad_(True)
+    # eval mode so batch norm doesn't vary each run. Also
+    net.eval().requires_grad_()
 
     register_hooks(net, layers, False)
     dataset = ClassificationData(opt)
 
-    in1 = "Leg/remeshed/Cabriole_5.obj"
-    in2 = "Leg/remeshed/Straight_4.obj"
-    out = "Leg_style"
+    in1 = "Leg/remeshed/Cabriole_3.obj"
+    in2 = "Leg/remeshed/Smooth_6.obj"
+    layers = [1]
+    out = "Leg_train_cab3-smt6_conv"
 
-    # mesh 1
+    # in1 = "cabinet/train/Ming_2.obj"
+    # in2 = "cabinet/train/Children_19.obj"
+    # layers = [0,1,2,3]
+    # out = "cabinet_train_ming2-chld19_conv"
+
     mesh1 = Mesh(file="../data/style/" + in1, hold_history=True)
-    mesh1.features = dataset.transforms(mesh1.features)
-    feat1 = mesh1.features.float().to(device).unsqueeze(0)
-    net(feat1, [mesh1])
-    act1 = activations["conv0"][0, :, :mesh1.history_data["edges_count"][0], 0]
-    gram1 = act1 @ act1.T
-
     mesh2 = Mesh(file="../data/style/" + in2, hold_history=True)
+    mesh1.features = dataset.transforms(mesh1.features)
     mesh2.features = dataset.transforms(mesh2.features)
-    feat2 = mesh2.features.float().to(device).unsqueeze(0)
-    net(feat2, [mesh2])
-    act2 = activations["conv0"][0, :, :mesh2.history_data["edges_count"][0], 0]
-    gram2 = act2 @ act2.T
-    loss = F.mse_loss(gram1, gram2)
+    feat = pad_sequence([mesh1.features.float().T, mesh2.features.float().T], batch_first=True).transpose(1,2)
+    feat = feat.to(device).requires_grad_()
+    net(feat, [mesh1, mesh2])
+    loss = gram_loss(activations, layers)
     loss.backward()
+    labels = feat.grad[0, :, :mesh1.history_data['edges_count'][0]].numpy()
 
-    tsne = manifold.TSNE(n_components=2, init='random', random_state=0, perplexity=80)
-    Y = tsne.fit_transform(act1)
-    labels = KMeans(n_clusters=2, random_state=0).fit_predict(Y)
-    plt.scatter(Y[:, 0], Y[:, 1], alpha=0.1, c=RGBs[labels] / 255)
-    # plt.show()
-    plt.savefig("visualisations/outputs/" + output_file + ".png")
-    mesh.export("visualisations/outputs/" + output_file + ".obj", history=2, e_color=labels)
+    mesh1.export("visualisations/outputs/" + out + ''.join(str(e) for e in layers) + ".obj", history=0, e_color=labels)
