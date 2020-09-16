@@ -1,6 +1,3 @@
-<img src='docs/imgs/alien.gif' align="right" width=325>
-<br><br><br>
-
 # A fork of MeshCNN in PyTorch
 
 This fork extends the original [meshCNN](https://github.com/ranahanocka/MeshCNN) implementation by [Rana Hanocka](https://www.cs.tau.ac.il/~hanocka/) and [Amir Hertz](http://pxcm.org/) for their SIGGRAPH 2019 [paper](https://bit.ly/meshcnn)
