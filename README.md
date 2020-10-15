@@ -1,5 +1,7 @@
 # A fork of MeshCNN in PyTorch
 
+This repository provides supporting code for my Masters thesis: [On Stylistic Differences Between 3D Meshes](On%20Stylistic%20Differences%20Between%203D%20Meshes.pdf)
+
 This fork extends the original [meshCNN](https://github.com/ranahanocka/MeshCNN) implementation by [Rana Hanocka](https://www.cs.tau.ac.il/~hanocka/) and [Amir Hertz](http://pxcm.org/) for their SIGGRAPH 2019 [paper](https://bit.ly/meshcnn)
 
 MeshCNN is a general-purpose deep neural network for 3D triangular meshes, which can be used for tasks such as 3D shape classification or segmentation. This framework includes convolution, pooling and unpooling layers which are applied directly on the mesh edges.
